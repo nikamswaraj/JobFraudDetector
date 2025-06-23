@@ -1,86 +1,101 @@
-# app.py
-
 import streamlit as st
-import joblib
 import pandas as pd
-import seaborn as sns
+import numpy as np
+import re
+from collections import Counter
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-st.set_page_config(page_title="Job Fraud Detector", page_icon="🛡️")
+st.set_page_config(page_title="Live Job Fraud Detector", layout="wide")
 
-# --- Load Model ---
-try:
-    vectorizer, model = joblib.load("logistic_job_fraud_model.pkl")
-except Exception as e:
-    st.error(f"❌ Error loading model: {e}")
-    st.stop()
+st.title("🕵️‍♂️ Job Posting Fraud Detection")
+st.markdown("Paste any job description to predict if it's **fraudulent** or **legitimate**. Data insights update as you type!")
 
-# --- Sidebar: Raw Data + Correlation ---
+# Load and train model
+@st.cache_data
+def load_model():
+    df = pd.read_csv("fake_job_postings.csv", encoding='ISO-8859-1')
+    df['text'] = df['description'].fillna('') + ' ' + df['requirements'].fillna('') + ' ' + df['benefits'].fillna('')
+    df = df[['text', 'fraudulent']].dropna()
+    
+    tfidf = TfidfVectorizer(stop_words='english', max_features=5000)
+    X = tfidf.fit_transform(df['text'])
+    y = df['fraudulent']
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
+
+    model = LogisticRegression(max_iter=1000, class_weight='balanced')
+    model.fit(X_train, y_train)
+
+    return model, tfidf, X_test, y_test, model.predict(X_test)
+
+model, tfidf, X_test, y_test, y_pred = load_model()
+
+# ---- Sidebar: Data Insights ----
 st.sidebar.title("📊 Data Insights")
 
-try:
-    raw_data = pd.read_csv("data/raw_data.csv", encoding="ISO-8859-1")
-    st.sidebar.subheader("🔍 Sample of Raw Data")
-    st.sidebar.dataframe(raw_data.head())
+# ---- User input ----
+user_input = st.text_area("Paste Job Posting Text Below", height=300)
 
-    st.sidebar.subheader("📈 Correlation Matrix")
-    corr = raw_data.corr(numeric_only=True)
-    fig, ax = plt.subplots(figsize=(6, 4))
-    sns.heatmap(corr, annot=True, cmap="coolwarm", ax=ax)
-    st.sidebar.pyplot(fig)
-except Exception as e:
-    st.sidebar.warning("⚠️ Couldn’t load raw data or correlation matrix.")
+def clean_text(text):
+    text = re.sub(r"[^A-Za-z0-9 ]", "", text.lower())
+    return text
 
-# --- Load Model Accuracy ---
-try:
-    with open("data/model_accuracy.txt", "r") as f:
-        model_accuracy = float(f.read().strip())
-except:
-    model_accuracy = None
+def extract_keywords(text, top_n=5):
+    words = clean_text(text).split()
+    stopwords = set(tfidf.get_stop_words() or [])
+    words = [word for word in words if word not in stopwords]
+    return Counter(words).most_common(top_n)
 
-# --- Main Interface ---
-st.title("🛡️ Job Fraud Detection App")
-st.markdown("Analyze job ads for potential fraud. Just paste the text below and click **Analyze**.")
+if user_input.strip():
+    # Sidebar insights
+    word_count = len(user_input.split())
+    st.sidebar.markdown(f"**📝 Word Count:** {word_count}")
 
-description = st.text_area("💼 Job Ad Content", height=300, placeholder="Paste the job description here...")
+    # Extract top words
+    top_words = extract_keywords(user_input)
+    st.sidebar.markdown("**🔥 Top Keywords:**")
+    for word, count in top_words:
+        st.sidebar.write(f"• {word} ({count}x)")
 
-if st.button("🔎 Analyze"):
-    try:
-        if not description or not description.strip():
-            raise ValueError("Job description cannot be empty.")
+    # Spammy keywords (simple examples)
+    spammy_words = ['congratulations', 'earn', 'click', 'limited', 'urgent', 'guaranteed', 'fee']
+    found_spam = [word for word in spammy_words if word in clean_text(user_input)]
+    if found_spam:
+        st.sidebar.markdown("**⚠️ Trigger Words:**")
+        for word in found_spam:
+            st.sidebar.write(f"• `{word}`")
+    else:
+        st.sidebar.markdown("**✅ No spammy words detected.**")
 
-        clean_text = description.strip().lower()
-        word_count = len(clean_text.split())
+    # ---- Predict fraud ----
+    input_vec = tfidf.transform([user_input])
+    pred = model.predict(input_vec)[0]
+    prob = model.predict_proba(input_vec)[0][pred]
+    label = "🚨 Fraudulent" if pred == 1 else "✅ Legitimate"
 
-        if len(clean_text) < 30 or word_count < 5:
-            raise ValueError("The job description is too short or uninformative. Please provide more detail.")
+    st.subheader("🔍 Prediction")
+    st.markdown(f"**Result**: {label}")
+    st.markdown(f"**Confidence**: {prob:.2f}")
 
-        # --- Prediction ---
-        tf_input = vectorizer.transform([description])
-        prediction = model.predict(tf_input)[0]
-        proba = model.predict_proba(tf_input)[0]
-        legit_score = proba[0]
-        fraud_score = proba[1]
-        confidence_gap = abs(legit_score - fraud_score)
-
-        # --- Threshold logic ---
-        if confidence_gap < 0.1:
-            st.warning("🤔 This job description is **ambiguous**. The model isn't confident enough to decide.")
-            st.markdown(f"**Confidence → Legit: {legit_score:.2%} | Fraudulent: {fraud_score:.2%}**")
-        elif prediction == 1:
-            st.error("🚨 This job post appears to be **FRAUDULENT**.")
-            st.markdown(f"**Confidence → Legit: {legit_score:.2%} | Fraudulent: {fraud_score:.2%}**")
-        else:
-            st.success("✅ This job post appears to be **LEGITIMATE**.")
-            st.markdown(f"**Confidence → Legit: {legit_score:.2%} | Fraudulent: {fraud_score:.2%}**")
-
-    except ValueError as ve:
-        st.warning(f"⚠️ {ve}")
-    except Exception as e:
-        st.error(f"❌ Prediction failed: {e}")
-
-# --- Footer Accuracy Info ---
-if model_accuracy is not None:
-    st.markdown(f"📊 **Model Accuracy:** `{model_accuracy:.2%}`")
 else:
-    st.markdown("⚠️ *Model accuracy unavailable.*")
+    st.sidebar.markdown("Enter a job posting above to see insights.")
+
+# ---- Model performance ----
+with st.expander("📈 Show Model Evaluation"):
+    acc = accuracy_score(y_test, y_pred)
+    st.write(f"**Accuracy:** {acc:.2f}")
+    st.text("Classification Report:")
+    st.text(classification_report(y_test, y_pred))
+
+    cm = confusion_matrix(y_test, y_pred)
+    fig, ax = plt.subplots()
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Purples', xticklabels=["Legit", "Fraud"], yticklabels=["Legit", "Fraud"])
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    st.pyplot(fig)
+
